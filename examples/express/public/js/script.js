@@ -93,7 +93,7 @@ $(document).ready(function(){
       $('#pageTitle').html('Find Routes by Location');
       $('#locationForm input[type=submit]').val('Find Agencies');
       $('#locationForm')
-        .attr('data-form-type', 'agencies')
+        .attr('data-form-type', 'routes')
         .show();
       $('#agencySelectForm').hide();
     })
@@ -126,40 +126,105 @@ $(document).ready(function(){
       $('#locationForm input[type=submit]').attr('disabled', 'disabled');
 
       //geocode
-      var geocodeQuery = $('#location').val().replace(/\s/g,'+');
-      $.getJSON('http://geocoding.cloudmade.com/' + cloudmadeAPI + '/geocoding/v2/find.js?query=' + geocodeQuery + '&return_location=true&callback=?', function(data){
-        $('#locationForm input[type=submit]').removeAttr('disabled');
-        
-        if(data.features){
+      var geocodeQuery = $('#location').val();
 
-          //get first result from geocoding
-          var lat = data.features[0].centroid.coordinates[0]
-            , lon = data.features[0].centroid.coordinates[1]
-            , radius = $('#radius').val();
-
-          switch($('#locationForm').attr('data-form-type')){
-            case 'agencies':
-              getAgenciesNearby(lat, lon, radius);
-              break;
-            case 'routes':
-              getRoutesNearby(lat, lon, radius);
-              break;
-            case 'stops':
-              getStopsNearby(lat, lon, radius);
-              break;
-          }
-
-        } else {
-          $('#locationForm fieldset').addClass('error');
+      // find the format
+      try {
+        // is it an array like [lat, lon] or an object?
+        var tmpLoc = JSON.parse(geocodeQuery);
+        if (!testLatLonArray(tmpLoc) && !testObject(tmpLoc)) {
+          askNominatim(geocodeQuery);
         }
-      });
-
-    } else {
-      $('#locationForm fieldset').addClass('error');
+      } catch (e) {
+        try {
+          // is it a litteral lat,lon coords ?
+          var tmpLoc = JSON.parse('['+geocodeQuery+']');
+          if (!testLatLonArray(tmpLoc)) {
+             askNominatim(geocodeQuery);
+          }
+        } catch (e) {
+          askNominatim(geocodeQuery);
+        }
+      }
     }
+
+    $('#locationForm input[type=submit]').removeAttr('disabled');
     return false;
   });
 });
+
+function askNominatim(geocodeQuery) {
+  $.getJSON('http://nominatim.openstreetmap.org/search?format=json&q='+encodeURIComponent(geocodeQuery), function(data,status){
+    //get first result from geocoding
+    doGetNearby(data[0].lat, data[0].lon, $('#radius').val());
+  });
+}
+
+function testLatLonArray(tmpLoc) {
+  if (Array.isArray(tmpLoc)) {
+    if (!isNaN(parseFloat(tmpLoc[0])) && !isNaN(parseFloat(tmpLoc[1]))) {
+      // format is lat,lon
+      doGetNearby(tmpLoc[0], tmpLoc[1], $('#radius').val());
+      return true;
+    } else {
+      return false;
+    }
+  } else {
+    return false;
+  }
+}
+function testObject(tmpLoc) {
+  if (tmpLoc instanceof Object) {
+    if (tmpLoc.lat && tmpLoc.lon) {
+      // format is {lat: lat,lon: lon}
+      doGetNearby(tmpLoc.lat, tmpLoc.lon, $('#radius').val());
+      return true;
+    } else if(tmpLoc.x && tmpLoc.y) {
+      // format is {y: lat,x: lon}
+      doGetNearby(tmpLoc.y, tmpLoc.x, $('#radius').val());
+      return true;
+    } else if(tmpLoc.loc) {
+      if (Array.isArray(tmpLoc.loc)) {
+        // format is {loc: [lat,lon]}
+        doGetNearby(tmpLoc.loc[0], tmpLoc.loc[1], $('#radius').val());
+        return true;
+      } else {
+        return false;
+      }
+    } else if(tmpLoc.coordinates) {
+      if (Array.isArray(tmpLoc.coordinates)) {
+        // format is {coordinates: [lat,lon]}
+        doGetNearby(tmpLoc.loc[0], tmpLoc.loc[1], $('#radius').val());
+        return true;
+      } else if (tmpLoc.coordinates instanceof Object){
+        // format is {coordinates: {latitude:lat,longitude:lon]}
+        doGetNearby(tmpLoc.coordinates.latitude, tmpLoc.coordinates.longitude, $('#radius').val());
+        return true;
+      } else {
+        return false;
+      }
+    } else {
+      return false;
+    }
+  } else {
+    return false;
+  }
+}
+
+function doGetNearby(lat, lon, radius) {
+  switch($('#locationForm').attr('data-form-type')){
+    case 'agencies':
+      getAgenciesNearby(lat, lon, radius);
+      break;
+    case 'routes':
+      getRoutesNearby(lat, lon, radius);
+      break;
+    case 'stops':
+      getStopsNearby(lat, lon, radius);
+      break;
+  }
+} 
+
 
 //IVAN TODO: Add form handler for routesByAgency here
 //Should use getRoutes() to 
@@ -292,9 +357,20 @@ function getAgenciesNearby(lat, lon, radius){
 
   $.getJSON('/api/agenciesNearby/' + lat + '/' + lon + '/' + radius || '', function(data){
     if(!data.length){
-      $('#data').html('No agencies within ' + radius + ' miles');
+      $.getJSON('/api/agenciesNearby/' + lon + '/' + lat + '/' + radius || '', function(data){
+        if(!data.length){
+          $('#data').html('No agencies within ' + radius + ' miles');
+          $('#map').hide();
+          return;
+        } else {
+          renderAgenciesNearby(data, lon, lat, radius);
+        }
+      });
+    } else {
+      renderAgenciesNearby(data, lat, lon, radius);
     }
-
+  });
+  function renderAgenciesNearby(data, lat, lon, radius) {
     //render map
     $('#map').show();
 
@@ -323,7 +399,7 @@ function getAgenciesNearby(lat, lon, radius){
     map.addLayer(markerGroup);
     map.fitBounds(mapBounds);
     renderTable(agenciesNearby, 'agenciesNearby');
-  });
+  }
 }
 
 function getRoutesNearby(lat, lon, radius){
@@ -333,10 +409,19 @@ function getRoutesNearby(lat, lon, radius){
 
   $.getJSON('/api/routesNearby/' + lat + '/' + lon + '/' + radius || '', function(data){
     if(!data.length){
-      $('#data').html('No routes within ' + radius + ' miles');
-      return;
+      $.getJSON('/api/routesNearby/' + lon + '/' + lat + '/' + radius || '', function(data){
+        if(!data.length){
+          $('#data').html('No routes within ' + radius + ' miles');
+          return;
+        } else {
+          renderRoutesNearby(data, lon, lat, radius);
+        }
+      });
+    } else {
+      renderRoutesNearby(data, lat, lon, radius);
     }
-
+  });
+  function renderRoutesNearby(data, lat, lon, radius) {
     data.forEach(function(route){
       routesNearby[route.route_id] = route;
       if(!agencies[route.agency_key].hasOwnProperty('routes')){
@@ -346,7 +431,7 @@ function getRoutesNearby(lat, lon, radius){
     });
 
     renderTable(routesNearby, 'routesNearby');
-  });
+  }
 }
 
 function getStopsNearby(lat, lon, radius){
@@ -356,10 +441,19 @@ function getStopsNearby(lat, lon, radius){
 
   $.getJSON('/api/stopsNearby/' + lat + '/' + lon + '/' + radius || '', function(data){
     if(!data.length){
-      $('#data').html('No stops within ' + radius + ' miles');
-      return;
+      $.getJSON('/api/stopsNearby/' + lon + '/' + lat + '/' + radius || '', function(data){
+        if(!data.length){
+          $('#data').html('No stops within ' + radius + ' miles');
+          $('#map').hide();
+          return;
+        }
+        renderStops(data, lon, lat, radius);
+      });
+    } else {
+      renderStops(data, lat, lon, radius);
     }
-
+  });
+  function renderStops(data, lat, lon, radius) {
     //render map
     $('#map').show();
 
@@ -388,7 +482,8 @@ function getStopsNearby(lat, lon, radius){
     map.addLayer(markerGroup);
     map.fitBounds(mapBounds);
     renderTable(stopsNearby, 'stopsNearby');
-  });
+
+  }
 }
 
 function renderTable(data, viewType){
