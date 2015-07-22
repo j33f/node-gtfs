@@ -11,11 +11,29 @@ var request = require('request')
   , Db = require('mongodb').Db
   , q;
 
+Object.defineProperty(global, '__stack', {
+  get: function(){
+    var orig = Error.prepareStackTrace;
+    Error.prepareStackTrace = function(_, stack){ return stack; };
+    var err = new Error;
+    Error.captureStackTrace(err, arguments.callee);
+    var stack = err.stack;
+    Error.prepareStackTrace = orig;
+    return stack;
+  }
+});
+
+Object.defineProperty(global, '__line', {
+  get: function(){
+    return __stack[1].getLineNumber();
+  }
+});
+
 //load config.js
 try {
   var config = require('../config.js');
 } catch (e) {
-  handleError(new Error('Cannot find config.js'));
+  throw new Error('Cannot find config.js');
 }
 
 
@@ -71,12 +89,19 @@ var GTFSFiles = [
 ];
 
 if(!config.agencies){
-  handleError(new Error('No agency_key specified in config.js\nTry adding \'capital-metro\' to the agencies in config.js to load transit data'));
+  throw new Error('No agency_key specified in config.js\nTry adding \'capital-metro\' to the agencies in config.js to load transit data');
   process.exit();
 }
 
+try {
+  var kuzzle = require('../lib/kuzzle')(config.kuzzle_url);
+} catch (e) {
+  console.log('Pb with Kuzzle');
+  throw e;
+}
+
 //open database and create queue for agency list
-Db.connect(config.mongo_url, {w: 1}, function(err, db) { 
+//Db.connect(config.mongo_url, {w: 1}, function(err, db) { 
   q = async.queue(downloadGTFS, 1);
   //loop through all agencies specified
   //If the agency_key is a URL, download that GTFS file, otherwise treat 
@@ -134,7 +159,7 @@ Db.connect(config.mongo_url, {w: 1}, function(err, db) {
       }
 
       if(!agency.agency_key || (!agency.agency_url && !agency.agency_path)) {
-        handleError(new Error('No URL or file path or Agency Key provided.'));
+        throw new Error('No URL or file path or Agency Key provided.');
       }
       q.push(agency);
     }
@@ -142,7 +167,7 @@ Db.connect(config.mongo_url, {w: 1}, function(err, db) {
 
   q.drain = function(e) {
     console.log('All agencies completed (' + config.agencies.length + ' total)');
-    db.close();
+    //db.close();
     process.exit();
   }
 
@@ -181,7 +206,7 @@ Db.connect(config.mongo_url, {w: 1}, function(err, db) {
           if(e.code == 'EEXIST') {
             cb();
           } else {
-            handleError(e);
+            throw e;
           }
         }
   		});
@@ -205,7 +230,7 @@ Db.connect(config.mongo_url, {w: 1}, function(err, db) {
       function processFile(path) {
         fs.createReadStream(path)
           .pipe(unzip.Extract({ path: downloadDir }).on('close', cb))
-          .on('error', handleError);       
+          .on('error', handleerror);       
       }
     }
 
@@ -213,8 +238,16 @@ Db.connect(config.mongo_url, {w: 1}, function(err, db) {
     function removeDatabase(cb){
       //remove old db records based on agency_key
       async.forEach(GTFSFiles, function(GTFSFile, cb){
-        db.collection(GTFSFile.collection, function(e, collection){
-          collection.remove({ agency_key: agency_key }, {safe: true}, cb);
+        kuzzle.search(GTFSFile.collection, {filter: {term: { agency_key: agency_key }}}, function(db){
+          console.log('DB');
+          console.dir(db, 10);
+          kuzzle.delete(GTFSFile.collection, db._id, function(result){
+            if (Object.keys(result.error).length) {
+              cb({e:result.error, l: __line});
+            } else {
+              cb();
+            }
+          });
         });
       }, function(e){
           cb(e, 'remove');
@@ -229,7 +262,7 @@ Db.connect(config.mongo_url, {w: 1}, function(err, db) {
           var filepath = path.join(downloadDir, GTFSFile.fileNameBase + '.txt');
           if (!fs.existsSync(filepath)) return cb();
           console.log(agency_key + ': ' + GTFSFile.fileNameBase + ' Importing data');
-          db.collection(GTFSFile.collection, function(e, collection){
+          //db.collection(GTFSFile.collection, function(e, collection){
             csv()
               .from.path(filepath, {columns: true})
               .on('record', function(line, index){
@@ -283,15 +316,17 @@ Db.connect(config.mongo_url, {w: 1}, function(err, db) {
                 }
 
                 //insert into db
-                collection.insert(line, function(e, inserted) {
-                  if(e) { handleError(e); }
+                kuzzle.create(GTFSFile.collection, line, true, function(inserted) {
+                  if (inserted.error) {
+                    throw {e:inserted.error, l: __line};
+                  }
                 });
               })
               .on('end', function(count){
                 cb();
               })
-              .on('error', handleError);
-          });
+              .on('error', handleerror);
+          //});
         }
       }, function(e){
         cb(e, 'import');
@@ -318,8 +353,13 @@ Db.connect(config.mongo_url, {w: 1}, function(err, db) {
         , (agency_bounds.ne[1] - agency_bounds.sw[1])/2 + agency_bounds.sw[1]
       ];
 
-      db.collection('agencies')
-        .update({agency_key: agency_key}, {$set: {agency_bounds: agency_bounds, agency_center: agency_center}}, {safe: true}, cb);
+      // db.collection('agencies')
+      //   .update({agency_key: agency_key}, {$set: {agency_bounds: agency_bounds, agency_center: agency_center}}, {safe: true}, cb);
+      kuzzle.search('agencies', {filter: {term: {agency_key: agency_key}}}, function(response) {
+        if (response.error) throw response.error;
+        kuzzle.update('agencies', {_id: response._id, agency_bounds: agency_bounds, agency_center: agency_center}, cb);
+        
+      })
     }
 
 
@@ -339,17 +379,27 @@ Db.connect(config.mongo_url, {w: 1}, function(err, db) {
 
     function fixCoordinates(cb) {
       console.log(agency_key + ':  Post Processing data - fix coordinates');
-      db.collection('stops').find({agency_key: agency_key, location_type: 1}, function(e, stations){
-        if (e) handleError(e);
+//      db.collection('stops').find({agency_key: agency_key, location_type: 1}, function(e, stations){
+      kuzzle.search('stops', {
+        filter: {
+          and: [
+            {term: {agency_key: agency_key}}
+            ,{term: {location_type: 1}}
+          ]
+        }}, function(stations) {
+        if (stations.error) throw {e:stations.error, l: __line};
         async.forEach(stations, function(station, cb){
           if (station.loc[0]==0 || (station.loc[1]==0)) {
             // its a station, and coordinates are wrong... lest find a stop in this station and copy its coordinates
             console.log(agency_key + ':  Post Processing data - fix coordinates - found "'+station.stop_id+'" have bad location');
-            db.collection('stops').findOne({agency_key: agency_key, parent_station: station.stop_id}, function(e, stop){
-              if (e) handleError(e);
+            //db.collection('stops').findOne({agency_key: agency_key, parent_station: station.stop_id}, function(e, stop){
+            kuzzle.search('stops', {filter: {and: [{term: {agency_key: agency_key}}, {term: {parent_station: station.stop_id}}]}}, function(stops){
+              if (stops.error) throw {e:stops.error, l: __line};
+              var stop = stops[0];
               sation.loc = stop.loc;
-              db.collection('stops').update({_id: station._id}, {$set: {loc: station.loc}}, {safe: true}, function(e) {
-                if (e) handleError(e);
+              //db.collection('stops').update({_id: station._id}, {$set: {loc: station.loc}}, {safe: true}, function(e) {
+              kuzzle.update('stops', {_id: station._id, loc: stop.loc}, function(response) {
+                if (response.error) throw {e:response.error, l: __line};
                 console.log(agency_key + ':  Post Processing data - fix coordinates - found "'+station.stop_id+'" have bad location : location fixed');
               });
             });
@@ -360,10 +410,10 @@ Db.connect(config.mongo_url, {w: 1}, function(err, db) {
       //cb();
     }
   }
-});
+//});
 
 
-function handleError(e) {
+function handleerror() {
   console.error(e || 'Unknown Error');
   process.exit(1)
 };
