@@ -1,6 +1,7 @@
 module.exports = {
     mongo_url: process.env.MONGOHQ_URL || 'mongodb://localhost:27017/gtfs'
   , kuzzle_url: process.env.KUZZLE_URL || 'http://localhost:7512'
+//  , kuzzle_url: process.env.KUZZLE_URL || 'http://api.uat/kuzzle.io:7512'
   , agencies: [
       /* Put agency_key names from gtfs-data-exchange.com.  
       Optionally, specify a download URL to use a dataset not from gtfs-data-exchange.com */

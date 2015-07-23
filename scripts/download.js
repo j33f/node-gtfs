@@ -185,7 +185,7 @@ try {
     async.series([
       cleanupFiles,
       downloadFiles,
-      removeDatabase,
+      //removeDatabase,
       importFiles,
       postProcess,
       cleanupFiles
@@ -238,15 +238,19 @@ try {
     function removeDatabase(cb){
       //remove old db records based on agency_key
       async.forEach(GTFSFiles, function(GTFSFile, cb){
-        kuzzle.search(GTFSFile.collection, {filter: {term: { agency_key: agency_key }}}, function(db){
-          kuzzle.delete(GTFSFile.collection, db._id, function(result){
-            console.dir (result);
-            if (result.error) {
-              cb({e:result.error, l: __line});
-            } else {
-              cb();
-            }
-          });
+        kuzzle.search(GTFSFile.collection, {query: {term: { agency_key: agency_key }}}, function(agencies){
+          console.log('**** REMOVE ', GTFSFile.collection, agency_key);
+          console.dir(agencies, 10);
+          if (agencies.result.hits.total) {
+            kuzzle.delete(GTFSFile.collection, agencies.result._id, function(result){
+              if (result.error) {
+                result.error.stack += '\n @Line' + __line;
+                cb(result.error);
+              } else {
+                cb();
+              }
+            });
+          }
         });
       }, function(e){
           cb(e, 'remove');
