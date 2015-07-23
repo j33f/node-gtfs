@@ -239,10 +239,9 @@ try {
       //remove old db records based on agency_key
       async.forEach(GTFSFiles, function(GTFSFile, cb){
         kuzzle.search(GTFSFile.collection, {filter: {term: { agency_key: agency_key }}}, function(db){
-          console.log('DB');
-          console.dir(db, 10);
           kuzzle.delete(GTFSFile.collection, db._id, function(result){
-            if (Object.keys(result.error).length) {
+            console.dir (result);
+            if (result.error) {
               cb({e:result.error, l: __line});
             } else {
               cb();
