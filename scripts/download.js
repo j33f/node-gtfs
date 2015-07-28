@@ -1,3 +1,6 @@
+/*global
+  node
+*/
 var request = require('request')
   , exec = require('child_process').exec
   , fs = require('fs')
@@ -9,7 +12,32 @@ var request = require('request')
   , glob = require('glob')
   , downloadDir = 'downloads'
   , Db = require('mongodb').Db
-  , q;
+  , esqbuilder = require('elasticsearch-query-builder')
+  , esQuery = function(query) {
+    var theQuery = {};
+    for (var i in query) {
+      switch (typeof query[i]) {
+        case 'string':
+          esqbuilder.stringCriteria(query[i], theQuery, i);
+          break;
+        case 'object':
+          if (Array.isArray(query[i])) {
+            var c = {};
+            for (var j in query[i]) {
+              c[j] = true;
+            }
+            esqbuilder.selectCriteria(c, theQuery, i);
+          } else {
+            esqbuilder.selectCriteria(query[i], theQuery, i);
+          }
+          break;
+      }
+    }
+    return theQuery;
+  }
+  , q
+  , writes = 0 // how many writes are been made and not answered
+;
 
 Object.defineProperty(global, '__stack', {
   get: function(){
@@ -238,11 +266,11 @@ try {
     function removeDatabase(cb){
       //remove old db records based on agency_key
       async.forEach(GTFSFiles, function(GTFSFile, cb){
-        kuzzle.search(GTFSFile.collection, {query: {term: { agency_key: agency_key }}}, function(agencies){
+        kuzzle.search(GTFSFile.collection, esQuery({agency_key: agency_key}), function(agencies){
           console.log('**** REMOVE ', GTFSFile.collection, agency_key);
           console.dir(agencies, 10);
           if (agencies.result.hits.total) {
-            kuzzle.delete(GTFSFile.collection, agencies.result._id, function(result){
+            kuzzle.delete(GTFSFile.collection, agencies.result.hits.hits._id, function(result){
               if (result.error) {
                 result.error.stack += '\n @Line' + __line;
                 cb(result.error);
@@ -269,67 +297,74 @@ try {
             csv()
               .from.path(filepath, {columns: true})
               .on('record', function(line, index){
-                 //remove null values
-                for(var key in line){
-                  if(line[key] === null){
-                    delete line[key];
-                  }
-                }
-                
-                //add agency_key
-                line.agency_key = agency_key;
+                if (!Array.isArray(line)) {
+                   //remove null values
 
-                //convert fields that should be int
-                if(line.stop_sequence){
-                  line.stop_sequence = parseInt(line.stop_sequence, 10);
-                }
-                if(line.direction_id){
-                  line.direction_id = parseInt(line.direction_id, 10);
-                }
-
-                //make lat/lon array
-                if(line.stop_lat && line.stop_lon){
-
-                  line.loc = [parseFloat(line.stop_lon), parseFloat(line.stop_lat)];
-
-                  // correct empty coords
-                  if (isNaN(line.loc[0])) line.loc[0] = 0;
-                  if (isNaN(line.loc[1])) line.loc[1] = 0;
-
-                  // convert to epsg4326 if needed
-                  if (agency_proj) {
-                    line.loc = proj4(agency_proj, 'WGS84', line.loc);
-                    line.stop_lon = line.loc[0];
-                    line.stop_lat = line.loc[1];                    
+                  for(var key in line){
+                    if(line[key] === null){
+                      delete line[key];
+                    }
                   }
                   
-                  //Calulate agency bounds
-                  if(agency_bounds.sw[0] > line.loc[0] || !agency_bounds.sw[0]){
-                    agency_bounds.sw[0] = line.loc[0];
-                  }
-                  if(agency_bounds.ne[0] < line.loc[0] || !agency_bounds.ne[0]){
-                    agency_bounds.ne[0] = line.loc[0];
-                  }
-                  if(agency_bounds.sw[1] > line.loc[1] || !agency_bounds.sw[1]){
-                    agency_bounds.sw[1] = line.loc[1];
-                  }
-                  if(agency_bounds.ne[1] < line.loc[1] || !agency_bounds.ne[1]){
-                    agency_bounds.ne[1] = line.loc[1];
-                  }
-                }
+                  //add agency_key
+                  line.agency_key = agency_key;
 
-                //insert into db
-                kuzzle.create(GTFSFile.collection, line, true, function(inserted) {
-                  if (inserted.error) {
-                    throw {e:inserted.error, l: __line};
+                  //convert fields that should be int
+                  if(line.stop_sequence){
+                    line.stop_sequence = parseInt(line.stop_sequence, 10);
                   }
-                });
+                  if(line.direction_id){
+                    line.direction_id = parseInt(line.direction_id, 10);
+                  }
+
+                  //make lat/lon array
+                  if(line.stop_lat && line.stop_lon){
+
+                    line.loc = [parseFloat(line.stop_lon), parseFloat(line.stop_lat)];
+
+                    // correct empty coords
+                    if (isNaN(line.loc[0])) line.loc[0] = 0;
+                    if (isNaN(line.loc[1])) line.loc[1] = 0;
+
+                    // convert to epsg4326 if needed
+                    if (agency_proj) {
+                      line.loc = proj4(agency_proj, 'WGS84', line.loc);
+                      line.stop_lon = line.loc[0];
+                      line.stop_lat = line.loc[1];                    
+                    }
+                    
+                    //Calulate agency bounds
+                    if(agency_bounds.sw[0] > line.loc[0] || !agency_bounds.sw[0]){
+                      agency_bounds.sw[0] = line.loc[0];
+                    }
+                    if(agency_bounds.ne[0] < line.loc[0] || !agency_bounds.ne[0]){
+                      agency_bounds.ne[0] = line.loc[0];
+                    }
+                    if(agency_bounds.sw[1] > line.loc[1] || !agency_bounds.sw[1]){
+                      agency_bounds.sw[1] = line.loc[1];
+                    }
+                    if(agency_bounds.ne[1] < line.loc[1] || !agency_bounds.ne[1]){
+                      agency_bounds.ne[1] = line.loc[1];
+                    }
+                  }
+
+                  //insert into db
+                  //console.log('INSERSION: ',line);
+                  writes++;
+                  kuzzle.create(GTFSFile.collection, line, true, function(inserted) {
+                    if (inserted.error) {
+                      console.log('INSERSION ERROR', GTFSFile.fileNameBase);
+                      console.dir(line);
+                      throw (inserted.error);
+                    }
+                    writes--;
+                  });
+                }
               })
               .on('end', function(count){
                 cb();
               })
               .on('error', handleerror);
-          //});
         }
       }, function(e){
         cb(e, 'import');
@@ -340,13 +375,27 @@ try {
     function postProcess(cb){
       console.log(agency_key + ':  Post Processing data');
 
-      async.series([
-          agencyCenter
-        , longestTrip
-        , fixCoordinates
-      ], function(e, results){
-        cb();
-      });
+      console.log(agency_key + ': ....awaiting...');
+
+      function doPostProcess(cb) {
+        async.series([
+            agencyCenter
+          , longestTrip
+          , fixCoordinates
+        ], function(e, results){
+          cb();
+        });
+      }
+
+      var await = setInterval(function(){
+        if (writes==0) {
+          clearInterval(await);
+          console.log('...lets go');
+          doPostProcess(cb);
+        } else {
+          console.log('...', writes, 'to go...');
+        }
+      }, 100);
     }
 
 
@@ -358,11 +407,17 @@ try {
 
       // db.collection('agencies')
       //   .update({agency_key: agency_key}, {$set: {agency_bounds: agency_bounds, agency_center: agency_center}}, {safe: true}, cb);
-      kuzzle.search('agencies', {filter: {term: {agency_key: agency_key}}}, function(response) {
-        if (response.error) throw response.error;
-        kuzzle.update('agencies', {_id: response._id, agency_bounds: agency_bounds, agency_center: agency_center}, cb);
-        
-      })
+      kuzzle.search('agencies', esQuery({agency_key: agency_key}), function(_response) {
+        //console.log('agencyCenter',_response);
+        var response = _response.result.hits.hits;
+        if (_response.error) {
+          console.log('agencyCenter ERROR');
+          throw response.error;
+        }
+        if (_response.result.hits.total) {
+          kuzzle.update('agencies', {_id: response._id, agency_bounds: agency_bounds, agency_center: agency_center}, cb);
+        }
+      });
     }
 
 
@@ -383,20 +438,28 @@ try {
     function fixCoordinates(cb) {
       console.log(agency_key + ':  Post Processing data - fix coordinates');
 //      db.collection('stops').find({agency_key: agency_key, location_type: 1}, function(e, stations){
-      kuzzle.search('stops', {
+      var query = {
         filter: {
           and: [
             {term: {agency_key: agency_key}}
             ,{term: {location_type: 1}}
           ]
-        }}, function(stations) {
+        }};
+      console.log(query);
+      kuzzle.search('stops', query, function(_stations) {
+        console.log(_stations);
+        var stations = _stations.result.hits.hits;
+        process.exit(0);
         if (stations.error) throw {e:stations.error, l: __line};
         async.forEach(stations, function(station, cb){
           if (station.loc[0]==0 || (station.loc[1]==0)) {
             // its a station, and coordinates are wrong... lest find a stop in this station and copy its coordinates
             console.log(agency_key + ':  Post Processing data - fix coordinates - found "'+station.stop_id+'" have bad location');
             //db.collection('stops').findOne({agency_key: agency_key, parent_station: station.stop_id}, function(e, stop){
-            kuzzle.search('stops', {filter: {and: [{term: {agency_key: agency_key}}, {term: {parent_station: station.stop_id}}]}}, function(stops){
+            var query = {filter: {and: [{term: {agency_key: agency_key}}, {term: {parent_station: station.stop_id}}]}};
+            console.log(query);
+            kuzzle.search('stops', query, function(stops){
+              console.log(stops);
               if (stops.error) throw {e:stops.error, l: __line};
               var stop = stops[0];
               sation.loc = stop.loc;
