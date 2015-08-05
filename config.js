@@ -6,10 +6,15 @@ module.exports = {
       /* Put agency_key names from gtfs-data-exchange.com.  
       Optionally, specify a download URL to use a dataset not from gtfs-data-exchange.com */
     /* You can specify a path to the GTFS file */
-    { agency_key: 'INTERCITES', path: '/home/jeff/Téléchargements/INTERCITES.gtfs.zip'}
     /* you can also specify a proj4 projection string to correct the bad formed coordinates */
     /*, {agency_key: 'lambertIIProjection', path: '/path/to/gtfs.zip', proj: '+proj=lcc +lat_1=46.8 +lat_0=46.8 +lon_0=0 +k_0=0.99987742 +x_0=600000 +y_0=2200000 +a=6378249.2 +b=6356515 +towgs84=-168,-60,320,0,0,0,0 +pm=paris +units=m +no_defs'}*/
     /* You can also specify a directory */
     /*, {dir: '/path/to/the/gtfs/dir/with/trailing/slash/'} */
+
+//    { agency_key: 'INTERCITES', path: '/home/jeff/Téléchargements/INTERCITES.gtfs.zip'}
+
+      {agency_key: 'AngersLoireMetropole.gtfs', path: '/home/jeff/Téléchargements/GTFS/AngersLoireMetropole.gtfs.zip', proj: '+proj=lcc +lat_1=46.8 +lat_0=46.8 +lon_0=0 +k_0=0.99987742 +x_0=600000 +y_0=2200000 +a=6378249.2 +b=6356515 +towgs84=-168,-60,320,0,0,0,0 +pm=paris +units=m +no_defs'}
+    , {agency_key: 'AngersLoireMetropole.Suburb.gtfs', path: '/home/jeff/Téléchargements/GTFS/AngersLoireMetropole.Suburb.gtfs.zip', proj: '+proj=lcc +lat_1=46.8 +lat_0=46.8 +lon_0=0 +k_0=0.99987742 +x_0=600000 +y_0=2200000 +a=6378249.2 +b=6356515 +towgs84=-168,-60,320,0,0,0,0 +pm=paris +units=m +no_defs'}
+    , {dir: '/home/jeff/Téléchargements/GTFS/'}
     ]
 }

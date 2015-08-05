@@ -6,11 +6,14 @@ var request = require('request')
   , fs = require('fs')
   , path = require('path')
   , csv = require('csv')
+  , Kuzzle = require('node-kuzzle')
+  , kuzzle
   , async = require('async')
   , unzip = require('unzip')
   , proj4 = require('proj4')
   , glob = require('glob')
   , downloadDir = 'downloads'
+  , sleep = require('sleep-async')()
   , Db = require('mongodb').Db
   , esqbuilder = require('elasticsearch-query-builder')
   , esQuery = function(query) {
@@ -72,6 +75,7 @@ var GTFSFiles = [
     , mapping: {
         agency_id :              {type: 'string'}
         , agency_name :          {type: 'string'}
+        , agency_key :           {type: 'string'}
         , agency_url :           {type: 'string'}
         , agency_timezone :      {type: 'string'}
         , agency_lang :          {type: 'string'}
@@ -82,6 +86,7 @@ var GTFSFiles = [
     , collection: 'calendardates'
     , mapping: {
         service_id :          {type: 'string'}
+        , agency_key :        {type: 'string'}
         , date :              {type: 'integer'}
         , exception_type :    {type: 'integer'}
     }
@@ -91,6 +96,7 @@ var GTFSFiles = [
     , collection: 'calendars'
     , mapping: {
         service_id :          {type: 'string'}
+        , agency_key :        {type: 'string'}
         , monday :            {type: 'integer'} 
         , tuesday :           {type: 'integer'} 
         , wednesday :         {type: 'integer'} 
@@ -124,6 +130,7 @@ var GTFSFiles = [
     , mapping: {
         route_id :                    {type: 'string'}
         , agency_id :                 {type: 'string'}
+        , agency_key :                {type: 'string'}
         , route_short_name :          {type: 'string'}
         , route_long_name :           {type: 'string'}
         , route_desc :                {type: 'string'}
@@ -138,6 +145,7 @@ var GTFSFiles = [
     , collection: 'stoptimes'
     , mapping: {
           trip_id :                 {type: 'string'}
+        , agency_key :              {type: 'string'}
         , arrival_time :            {type: 'string'}
         , departure_time :          {type: 'string'}
         , stop_id :                 {type: 'string'}
@@ -153,6 +161,7 @@ var GTFSFiles = [
     , collection: 'stops'
     , mapping: {
         stop_id :         {type: 'string'}
+      , agency_key :      {type: 'string'}
       , stop_name :       {type: 'string'}
       , stop_desc :       {type: 'string'}
       , stop_lat :        {type: 'float'}
@@ -161,6 +170,7 @@ var GTFSFiles = [
       , stop_url:         {type: 'string'}
       , location_type:    {type: 'string'}
       , parent_station :  {type: 'string'}
+      , loc :             {type: 'geo_point'}
 
     }
   },
@@ -169,6 +179,7 @@ var GTFSFiles = [
     , collection: 'transfers'
     , mapping: {
         from_stop_id :        {type: 'string'}
+        , agency_key :        {type: 'string'}
         , to_stop_id :        {type: 'string'}
         , transfer_type :     {type: 'string'}
         , min_transfer_time : {type: 'string'}
@@ -179,6 +190,7 @@ var GTFSFiles = [
     , collection: 'trips'
     , mapping: {
         route_id :        {type: 'string'}
+      , agency_key :      {type: 'string'}
       , service_id :      {type: 'string'}
       , trip_id :         {type: 'string'}
       , trip_headsign :   {type: 'string'}
@@ -188,19 +200,17 @@ var GTFSFiles = [
     }
   }
 ];
-
 if(!config.agencies){
   throw new Error('No agency_key specified in config.js\nTry adding \'capital-metro\' to the agencies in config.js to load transit data');
   process.exit();
 }
 
 try {
-  var kuzzle = require('../lib/kuzzle')(config.kuzzle_url);
+  kuzzle = Kuzzle.init(config.kuzzle_url);
 } catch (e) {
   console.log('Pb with Kuzzle');
   throw e;
 }
-
 //open database and create queue for agency list
 //Db.connect(config.mongo_url, {w: 1}, function(err, db) { 
   q = async.queue(downloadGTFS, 1);
@@ -269,6 +279,7 @@ try {
   q.drain = function(e) {
     console.log('All agencies completed (' + config.agencies.length + ' total)');
     //db.close();
+    kuzzle.close();
     process.exit();
   }
 
@@ -286,7 +297,7 @@ try {
     async.series([
       cleanupFiles,
       downloadFiles,
-      //removeDatabase,
+      removeDatabase,
       importFiles,
       postProcess,
       cleanupFiles
@@ -339,18 +350,13 @@ try {
     function removeDatabase(cb){
       //remove old db records based on agency_key
       async.forEach(GTFSFiles, function(GTFSFile, cb){
-        kuzzle.search(GTFSFile.collection, esQuery({agency_key: agency_key}), function(agencies){
-          console.log('**** REMOVE ', GTFSFile.collection, agency_key);
-          console.dir(agencies, 10);
-          if (agencies.result.hits.total) {
-            kuzzle.delete(GTFSFile.collection, agencies.result.hits.hits._id, function(result){
-              if (result.error) {
-                result.error.stack += '\n @Line' + __line;
-                cb(result.error);
-              } else {
-                cb();
-              }
-            });
+        kuzzle.deleteByQuery(GTFSFile.collection, esQuery({agency_key: agency_key}), function(error, result){
+          if (error) {
+            console.log('ERROR REMOVE');
+            throw error;
+          } else {
+            console.log('**** REMOVED ', GTFSFile.collection, agency_key);
+            cb();
           }
         });
       }, function(e){
@@ -431,13 +437,25 @@ try {
                 //   }
                 //   writes--;
                 // });
-                lines.push(line);
+                
+                //lines.push(line);
+
+                kuzzle.prepare(GTFSFile.collection, 'insert', line);
               }
             })
             .on('end', function(count){
               writes++
-              kuzzle.bulk(GTFSFile.collection, lines, function(inserted) {
-                if (inserted.error) {
+              // kuzzle.bulk(GTFSFile.collection, lines, function(inserted) {
+              //   if (inserted.error) {
+              //     console.log('INSERSION ERROR', GTFSFile.fileNameBase, lines);
+              //     throw (inserted.error);
+              //   }
+              //   writes--;
+              //   console.log(GTFSFile.collection, 'finished !');
+              // });
+              kuzzle.commit(GTFSFile.collection, function(error, response) {
+                //console.log(error,response);
+                if (error) {
                   console.log('INSERSION ERROR', GTFSFile.fileNameBase, lines);
                   throw (inserted.error);
                 }
@@ -451,15 +469,13 @@ try {
       }
       async.forEachSeries(GTFSFiles, function(GTFSFile, cb){
         if(GTFSFile){
-          // create the collection and add the mapping if there is a mapping
+          //create the collection and add the mapping if there is a mapping
           if (GTFSFile.mapping) {
             kuzzle.admin(GTFSFile.fileNameBase, 'deleteCollection', null, function(response){
+              //console.log('deleteCollection',response);
               var mapping = {properties: GTFSFile.mapping};   
               kuzzle.putMapping(GTFSFile.fileNameBase, mapping, function(response){
-                if (response.error) {
-                  console.log('putMapping ERROR', GTFSFile.fileNameBase, mapping, 'source', response.result._source);
-                  throw response.error;
-                }
+                //console.log('putMapping',response);
                 doImportFile(GTFSFile, cb);
               });
             });
@@ -467,6 +483,7 @@ try {
             // no mapping, just import the file
             doImportFile(GTFSFile, cb);
           }
+         // doImportFile(GTFSFile, cb);
         }
       }, function(e){
         cb(e, 'import');
@@ -480,13 +497,16 @@ try {
       console.log(agency_key + ': ....awaiting...');
 
       function doPostProcess(cb) {
-        async.series([
-            agencyCenter
-          , longestTrip
-          , fixCoordinates
-        ], function(e, results){
-          cb();
-        });
+//        sleep.sleep(2000, function(){
+          console.log('Starting post processing');
+          async.series([
+              agencyCenter
+            , longestTrip
+            , fixCoordinates
+          ], function(e, results){
+            cb();
+          });
+//        });
       }
 
       var await = setInterval(function(){
@@ -510,14 +530,15 @@ try {
 
       // db.collection('agencies')
       //   .update({agency_key: agency_key}, {$set: {agency_bounds: agency_bounds, agency_center: agency_center}}, {safe: true}, cb);
-
-      kuzzle.search('agencies', esQuery({agency_key: agency_key}), function(_response) {
-        if (_response.error) {
+      //var query = esQuery({agency_key: agency_key});
+      kuzzle.search('agencies', {query: {match: {agency_key: agency_key}}}, function(_error, _response) {
+        //console.log(_error, _response);
+        if (_error) {
           console.log('agencyCenter ERROR');
-          throw response.error;
+          throw _error;
         }
-        if (_response.result.hits.total) {
-          var _id = _response.result.hits.hits[0]._id;
+        if (_response.hits.total) {
+          var _id = _response.hits.hits[0]._id;
           kuzzle.update('agencies', {_id: _id, agency_bounds: agency_bounds, agency_center: agency_center}, cb);
         } else {
           console.log('Post Processing > Agency Center', agency_key, 'not found...');
@@ -552,9 +573,9 @@ try {
           ]
         }
       };
-      kuzzle.search('stops', query, function(_stations) {
-        var stations = _stations.result.hits.hits;
-        if (stations.error) throw {e:stations.error, l: __line};
+      kuzzle.search('stops', query, function(_error, _stations) {
+        var stations = _stations.hits.hits;
+        if (_error) throw {e:_error, l: __line};
         async.forEach(stations, function(station, cb){
           if (station.loc[0]==0 || (station.loc[1]==0)) {
             // its a station, and coordinates are wrong... lest find a stop in this station and copy its coordinates
@@ -581,7 +602,8 @@ try {
 //});
 
 
-function handleerror() {
+function handleerror(e) {
+  throw e;
   console.error(e || 'Unknown Error');
   process.exit(1)
 };
